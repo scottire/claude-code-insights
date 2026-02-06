@@ -50,34 +50,79 @@ def _(mo):
         value=10,
         step=5,
     )
-    run_button = mo.ui.run_button(label="Run Pipeline", full_width=True)
 
-    return api_key_input, local_limit, workers_input, run_button
+    return api_key_input, local_limit, workers_input
 
 
 @app.cell
-def _(Path, local_limit):
-    # Load transcripts from local Claude directory
+def _(Path):
+    # Check if Claude sessions directory exists
     claude_dir = Path.home() / ".claude" / "projects"
-    transcripts = []
-    load_error = None
+    claude_dir_exists = claude_dir.exists()
 
-    if not claude_dir.exists():
-        load_error = f"Claude projects directory not found: {claude_dir}"
+    # Count available sessions without loading them
+    session_count = 0
+    if claude_dir_exists:
+        for project_dir in claude_dir.glob("*"):
+            if project_dir.is_dir():
+                session_count += len([f for f in project_dir.glob("*.jsonl") if "subagents" not in str(f)])
+
+    return claude_dir, claude_dir_exists, session_count
+
+
+@app.cell
+def _(claude_dir, claude_dir_exists, mo, session_count):
+    # Button to approve loading sessions
+    load_sessions_button = mo.ui.run_button(label="Load Sessions", full_width=True)
+
+    if not claude_dir_exists:
+        sessions_info = mo.callout(
+            f"Claude sessions directory not found:\n`{claude_dir}`",
+            kind="danger"
+        )
+    else:
+        sessions_info = mo.vstack([
+            mo.md(f"**{session_count} sessions** found in:"),
+            mo.md(f"`{claude_dir}`"),
+            load_sessions_button,
+        ])
+
+    return load_sessions_button, sessions_info
+
+
+@app.cell
+def _(claude_dir, claude_dir_exists, load_sessions_button, local_limit, mo):
+    # Only load transcripts after user approves
+    transcripts = []
+    load_status = None
+
+    if not claude_dir_exists:
+        load_status = mo.callout("No Claude sessions directory found.", kind="warn")
+    elif not load_sessions_button.value:
+        load_status = mo.md("*Click 'Load Sessions' to load your transcripts*")
     else:
         from insights.pipeline import load_transcripts_from_claude_dir
         transcripts = load_transcripts_from_claude_dir(claude_dir, limit=local_limit.value)
+        load_status = mo.callout(f"Loaded {len(transcripts)} sessions", kind="success")
 
-    return claude_dir, transcripts, load_error, load_transcripts_from_claude_dir
+    return transcripts, load_status, load_transcripts_from_claude_dir
+
+
+@app.cell
+def _(mo):
+    # Run pipeline button (separate from load)
+    run_button = mo.ui.run_button(label="Run Pipeline", full_width=True)
+    return (run_button,)
 
 
 @app.cell
 def _(
     api_key_input,
-    load_error,
+    load_status,
     local_limit,
     mo,
     run_button,
+    sessions_info,
     transcripts,
     workers_input,
 ):
@@ -85,22 +130,16 @@ def _(
     sidebar_content = mo.vstack([
         mo.md("## Configuration"),
         api_key_input,
-        mo.md("[Get your API key →](https://wandb.ai/authorize)", style={"font-size": "12px"}),
+        mo.md("[Get your API key →](https://wandb.ai/authorize)"),
         mo.md("---"),
         mo.md("## Sessions"),
-        local_limit,
-        workers_input,
-        mo.md(f"**Found {len(transcripts)} sessions**") if not load_error else mo.callout(load_error, kind="danger"),
-        mo.md("---"),
-        run_button,
-        mo.md("---"),
-        mo.md("""
-### Pipeline Stages
-1. **Facet Extraction** - Extract structured data
-2. **Aggregation** - Combine into statistics
-3. **Map-Reduce** - 7 parallel analysis prompts
-4. **Synthesis** - At-a-glance summary
-        """),
+        sessions_info,
+        load_status if transcripts else None,
+        mo.md("---") if transcripts else None,
+        local_limit if transcripts else None,
+        workers_input if transcripts else None,
+        mo.md("---") if transcripts else None,
+        run_button if transcripts else None,
     ])
 
     return (sidebar_content,)
@@ -113,7 +152,11 @@ def _(mo):
         r"""
         # Claude Code Insights Pipeline
 
-        Configure settings in the sidebar and click **Run Pipeline**.
+        This notebook analyzes your Claude Code sessions and generates an insights report.
+
+        1. **Enter your W&B API key** in the sidebar
+        2. **Load your sessions** from `~/.claude/projects`
+        3. **Run the pipeline** to generate your report
         """
     )
     return
@@ -146,13 +189,13 @@ def _(
     transcripts,
     workers_input,
 ):
-    mo.stop(not run_button.value, mo.md("*Click 'Run Pipeline' in the sidebar to start*"))
+    mo.stop(not run_button.value, mo.md("*Load sessions and click 'Run Pipeline' to start*"))
 
     if not api_key_input.value:
         mo.stop(True, mo.callout("Please enter your W&B API Key in the sidebar.", kind="warn"))
 
     if not transcripts:
-        mo.stop(True, mo.callout("No transcripts found to analyze.", kind="warn"))
+        mo.stop(True, mo.callout("Please load sessions first.", kind="warn"))
 
     from insights.pipeline import init_weave, run_insights_pipeline, get_weave_url
 
