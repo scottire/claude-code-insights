@@ -85,6 +85,7 @@ def _(
     sidebar_content = mo.vstack([
         mo.md("## Configuration"),
         api_key_input,
+        mo.md("[Get your API key →](https://wandb.ai/authorize)", style={"font-size": "12px"}),
         mo.md("---"),
         mo.md("## Sessions"),
         local_limit,
