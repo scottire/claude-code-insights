@@ -275,10 +275,10 @@ def load_transcripts_from_claude_dir(claude_dir: Path, limit: int | None = None)
     # Sort by modification time (most recent first)
     jsonl_files.sort(key=lambda f: f.stat().st_mtime, reverse=True)
 
-    if limit:
-        jsonl_files = jsonl_files[:limit]
-
+    # Load until we have `limit` valid sessions (not just first `limit` files)
     for jsonl_file in jsonl_files:
+        if limit and len(transcripts) >= limit:
+            break
         try:
             transcript = parse_jsonl_session(jsonl_file)
             if transcript["messages"]:  # Only include non-empty sessions
