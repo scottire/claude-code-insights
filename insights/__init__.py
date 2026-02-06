@@ -7,6 +7,7 @@ insight reports about usage patterns, friction points, and suggestions.
 
 from insights.pipeline import (
     init_weave,
+    get_weave_url,
     get_client,
     run_insights_pipeline,
     load_transcripts,
@@ -16,6 +17,7 @@ from insights.report_template import generate_html_report
 
 __all__ = [
     "init_weave",
+    "get_weave_url",
     "get_client",
     "run_insights_pipeline",
     "load_transcripts",

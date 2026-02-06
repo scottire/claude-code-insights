@@ -30,19 +30,30 @@ from insights.prompts import get_prompt
 # ============================================================================
 
 _weave_initialized = False
+_weave_url = None
 
 
-def init_weave(project: str = "claude-code-insights") -> None:
+def init_weave(project: str = "claude-code-insights") -> str:
     """
     Initialize Weave tracing.
 
     Call this explicitly before running the pipeline if you want tracing.
     This is NOT called on import to avoid side effects.
+
+    Returns:
+        The Weave project URL (e.g. https://wandb.ai/entity/project/weave)
     """
-    global _weave_initialized
+    global _weave_initialized, _weave_url
     if not _weave_initialized:
-        weave.init(project)
+        client = weave.init(project)
+        _weave_url = f"https://wandb.ai/{client.entity}/{client.project}/weave"
         _weave_initialized = True
+    return _weave_url
+
+
+def get_weave_url() -> str | None:
+    """Get the Weave URL if initialized."""
+    return _weave_url
 
 
 # ============================================================================
@@ -543,7 +554,7 @@ def run_insights_pipeline(
     transcripts: list[dict],
     api_key: str | None = None,
     workers: int = 5,
-    on_progress: Callable[[str, int, int], None] | None = None
+    log: Callable[[str], None] | None = None
 ) -> Annotated[bytes, Content[Literal['html']]]:
     """
     Run the full insights pipeline on transcripts.
@@ -552,21 +563,25 @@ def run_insights_pipeline(
         transcripts: List of parsed session transcripts
         api_key: W&B API key (or set WANDB_API_KEY env var)
         workers: Number of parallel workers
-        on_progress: Optional callback(stage, completed, total) for progress updates
+        log: Optional callback for log messages (e.g. print or mo.output.append)
 
     Returns:
         HTML report bytes
     """
     from insights.report_template import generate_html_report
 
-    def progress(stage: str, completed: int, total: int):
-        if on_progress:
-            on_progress(stage, completed, total)
+    def emit(msg: str):
+        if log:
+            log(msg)
 
     # Filter valid transcripts
     valid_transcripts = [t for t in transcripts if not should_skip_session(t)]
+    skipped = len(transcripts) - len(valid_transcripts)
+    emit(f"Processing {len(valid_transcripts)} sessions ({skipped} skipped)")
 
     # Stage 1: Extract facets in parallel
+    emit(f"\n[Stage 1] Extracting facets with {workers} workers...")
+
     def extract_worker(t):
         return extract_facets_from_transcript(t, api_key)
 
@@ -574,13 +589,18 @@ def run_insights_pipeline(
         items=valid_transcripts,
         worker_fn=extract_worker,
         max_workers=workers,
-        on_progress=lambda c, t: progress("Extracting facets", c, t)
+        on_progress=lambda c, t: emit(f"  Facets: {c}/{t}")
     )
+    emit(f"  Extracted {len(facets)} facets ({len(errors)} errors)")
 
     # Stage 2: Aggregate (pure Python)
+    emit(f"\n[Stage 2] Aggregating facets...")
     aggregated = aggregate_facets(facets)
+    emit(f"  Aggregated {aggregated['total_sessions']} sessions")
 
     # Stage 3: Run analysis prompts in parallel
+    emit(f"\n[Stage 3] Running 7 analysis prompts in parallel...")
+
     def analysis_worker(prompt_name: str) -> tuple[str, dict]:
         return run_analysis_prompt(prompt_name, aggregated, facets, api_key)
 
@@ -588,17 +608,18 @@ def run_insights_pipeline(
         items=ANALYSIS_PROMPTS,
         worker_fn=analysis_worker,
         max_workers=7,
-        on_progress=lambda c, t: progress("Running analysis", c, t)
+        on_progress=lambda c, t: emit(f"  Analysis: {c}/{t}")
     )
 
     analysis = {name: result for name, result in raw_results}
     for err in analysis_errors:
         analysis[err["item"]] = {"error": err["error"]}
+    emit(f"  Completed: {', '.join(analysis.keys())}")
 
     # Stage 4: Generate at-a-glance synthesis
-    progress("Generating synthesis", 0, 1)
+    emit(f"\n[Stage 4] Generating at-a-glance synthesis...")
     at_a_glance = generate_at_a_glance(analysis, aggregated, api_key)
-    progress("Generating synthesis", 1, 1)
+    emit(f"  Done!")
 
     # Calculate date range
     all_dates = []
@@ -625,7 +646,9 @@ def run_insights_pipeline(
     }
 
     # Generate HTML report
+    emit(f"\nGenerating HTML report...")
     html = generate_html_report(report)
+    emit(f"Pipeline complete! Report size: {len(html) / 1024:.1f} KB")
 
     return html.encode('utf-8')
 

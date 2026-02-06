@@ -10,14 +10,8 @@
 """
 Claude Code Insights Pipeline - Marimo Notebook
 
-An educational notebook that teaches the /insights pipeline architecture
-while also letting you run it on your own Claude Code sessions.
-
 Run with:
     uvx marimo edit --sandbox insights_sandbox.py
-
-Or from GitHub:
-    uvx marimo edit --sandbox https://raw.githubusercontent.com/scottire/claude-code-insights/main/insights_sandbox.py
 """
 
 import marimo
@@ -42,11 +36,6 @@ def _(mo):
         placeholder="Enter your Weights & Biases API key",
         full_width=True,
     )
-    weave_project_input = mo.ui.text(
-        label="Weave Project Name",
-        value="claude-code-insights",
-        full_width=True,
-    )
     workers_input = mo.ui.slider(
         label="Parallel Workers",
         start=1,
@@ -63,7 +52,7 @@ def _(mo):
     )
     run_button = mo.ui.run_button(label="Run Pipeline", full_width=True)
 
-    return api_key_input, local_limit, weave_project_input, workers_input, run_button
+    return api_key_input, local_limit, workers_input, run_button
 
 
 @app.cell
@@ -90,14 +79,12 @@ def _(
     mo,
     run_button,
     transcripts,
-    weave_project_input,
     workers_input,
 ):
     # Sidebar with configuration
     sidebar_content = mo.vstack([
         mo.md("## Configuration"),
         api_key_input,
-        weave_project_input,
         mo.md("---"),
         mo.md("## Sessions"),
         local_limit,
@@ -108,10 +95,10 @@ def _(
         mo.md("---"),
         mo.md("""
 ### Pipeline Stages
-1. **Facet Extraction** - Extract structured data from each session
-2. **Aggregation** - Combine into statistics (no LLM)
+1. **Facet Extraction** - Extract structured data
+2. **Aggregation** - Combine into statistics
 3. **Map-Reduce** - 7 parallel analysis prompts
-4. **Synthesis** - Generate at-a-glance summary
+4. **Synthesis** - At-a-glance summary
         """),
     ])
 
@@ -125,7 +112,7 @@ def _(mo):
         r"""
         # Claude Code Insights Pipeline
 
-        This notebook replicates the `/insights` command from Claude Code. Configure your settings in the sidebar and click **Run Pipeline** to analyze your sessions.
+        Configure settings in the sidebar and click **Run Pipeline**.
         """
     )
     return
@@ -156,10 +143,8 @@ def _(
     mo,
     run_button,
     transcripts,
-    weave_project_input,
     workers_input,
 ):
-    # Pipeline execution
     mo.stop(not run_button.value, mo.md("*Click 'Run Pipeline' in the sidebar to start*"))
 
     if not api_key_input.value:
@@ -168,18 +153,14 @@ def _(
     if not transcripts:
         mo.stop(True, mo.callout("No transcripts found to analyze.", kind="warn"))
 
-    from insights.pipeline import init_weave, run_insights_pipeline
-    import weave
+    from insights.pipeline import init_weave, run_insights_pipeline, get_weave_url
 
-    # Initialize Weave
-    init_weave(weave_project_input.value)
+    # Initialize Weave with hardcoded project name
+    weave_url = init_weave("claude-code-insights")
 
-    # Get the weave trace URL base
-    weave_url = f"https://wandb.ai/{weave_project_input.value}/weave"
+    mo.md(f"**Weave Traces:** [{weave_url}]({weave_url})")
 
-    mo.md(f"**Starting pipeline...** Traces will appear at: [{weave_url}]({weave_url})")
-
-    return init_weave, run_insights_pipeline, weave, weave_url
+    return init_weave, run_insights_pipeline, get_weave_url, weave_url
 
 
 @app.cell
@@ -194,24 +175,33 @@ def _(
 ):
     mo.stop(not run_button.value)
 
-    # Run the pipeline
-    with mo.status.spinner("Running pipeline...") as _spinner:
-        html_bytes = run_insights_pipeline(
-            transcripts=transcripts,
-            api_key=api_key_input.value,
-            workers=workers_input.value,
-        )
+    # Create output area for logs
+    logs = []
+
+    def log_message(msg: str):
+        logs.append(msg)
+
+    # Run the pipeline with logging
+    html_bytes = run_insights_pipeline(
+        transcripts=transcripts,
+        api_key=api_key_input.value,
+        workers=workers_input.value,
+        log=log_message,
+    )
 
     html_report = html_bytes.decode("utf-8")
 
+    # Show logs and success message
     mo.vstack([
         mo.callout(
-            mo.md(f"**Pipeline complete!** View traces at: [{weave_url}]({weave_url})"),
+            mo.md(f"**Pipeline complete!** View traces: [{weave_url}]({weave_url})"),
             kind="success"
         ),
+        mo.md("### Pipeline Logs"),
+        mo.md(f"```\n{chr(10).join(logs)}\n```"),
     ])
 
-    return html_bytes, html_report
+    return html_bytes, html_report, logs, log_message
 
 
 @app.cell
