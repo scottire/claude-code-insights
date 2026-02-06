@@ -8,7 +8,10 @@
 # ]
 # ///
 """
-Claude Code Insights Pipeline - Marimo Notebook
+Claude Code Insights Pipeline
+
+Analyze your Claude Code sessions to see what's working, where things go wrong,
+and get suggestions for improvement.
 
 Run with:
     uvx marimo edit --sandbox insights_sandbox.py
@@ -24,139 +27,160 @@ app = marimo.App(width="full")
 def _():
     import marimo as mo
     from pathlib import Path
-    return mo, Path
+    from datetime import datetime
+    return mo, Path, datetime
 
 
 @app.cell
 def _(mo):
-    # Configuration inputs
+    mo.md(
+        """
+        # Claude Code Insights
+
+        This notebook analyzes your Claude Code sessions and generates a report showing:
+        - What you've been working on
+        - Where Claude helped (and where it got in the way)
+        - Features worth trying
+
+        The analysis runs through four stages, each building on the last.
+        """
+    )
+    return
+
+
+@app.cell
+def _(mo):
+    # API key input
     api_key_input = mo.ui.text(
         label="W&B API Key",
         kind="password",
-        placeholder="Enter your Weights & Biases API key",
+        placeholder="Paste your API key here",
         full_width=True,
     )
-    workers_input = mo.ui.slider(
-        label="Parallel Workers",
-        start=1,
-        stop=10,
-        value=5,
-        step=1,
-    )
-    local_limit = mo.ui.slider(
-        label="Sessions to analyze",
-        start=5,
-        stop=50,
-        value=10,
-        step=5,
-    )
-
-    return api_key_input, local_limit, workers_input
+    mo.vstack([
+        api_key_input,
+        mo.md("[Get your API key](https://wandb.ai/authorize)"),
+    ])
+    return (api_key_input,)
 
 
 @app.cell
 def _(Path):
-    # Check if Claude sessions directory exists
+    # Check for Claude sessions
     claude_dir = Path.home() / ".claude" / "projects"
     claude_dir_exists = claude_dir.exists()
+    return claude_dir, claude_dir_exists
 
-    # Count available sessions without loading them
-    session_count = 0
+
+@app.cell
+def _(claude_dir, claude_dir_exists, datetime, mo):
+    # Scan for sessions without loading them
+    session_files = []
     if claude_dir_exists:
         for project_dir in claude_dir.glob("*"):
             if project_dir.is_dir():
-                session_count += len([f for f in project_dir.glob("*.jsonl") if "subagents" not in str(f)])
+                for f in project_dir.glob("*.jsonl"):
+                    if "subagents" not in str(f):
+                        stat = f.stat()
+                        session_files.append({
+                            "file": f,
+                            "project": project_dir.name[:40] + "..." if len(project_dir.name) > 40 else project_dir.name,
+                            "modified": datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M"),
+                            "size_kb": round(stat.st_size / 1024, 1),
+                        })
 
-    return claude_dir, claude_dir_exists, session_count
-
-
-@app.cell
-def _(claude_dir, claude_dir_exists, mo, session_count):
-    # Button to approve loading sessions
-    load_sessions_button = mo.ui.run_button(label="Load Sessions", full_width=True)
-
-    if not claude_dir_exists:
-        sessions_info = mo.callout(
-            f"Claude sessions directory not found:\n`{claude_dir}`",
-            kind="danger"
-        )
-    else:
-        sessions_info = mo.vstack([
-            mo.md(f"**{session_count} sessions** found in:"),
-            mo.md(f"`{claude_dir}`"),
-            load_sessions_button,
-        ])
-
-    return load_sessions_button, sessions_info
-
-
-@app.cell
-def _(claude_dir, claude_dir_exists, load_sessions_button, local_limit, mo):
-    # Only load transcripts after user approves
-    transcripts = []
-    load_status = None
+    # Sort by modified time (newest first)
+    session_files.sort(key=lambda x: x["modified"], reverse=True)
 
     if not claude_dir_exists:
-        load_status = mo.callout("No Claude sessions directory found.", kind="warn")
-    elif not load_sessions_button.value:
-        load_status = mo.md("*Click 'Load Sessions' to load your transcripts*")
-    else:
-        from insights.pipeline import load_transcripts_from_claude_dir
-        transcripts = load_transcripts_from_claude_dir(claude_dir, limit=local_limit.value)
-        load_status = mo.callout(f"Loaded {len(transcripts)} sessions", kind="success")
+        mo.callout(f"No Claude sessions found at `{claude_dir}`", kind="warn")
 
-    return transcripts, load_status, load_transcripts_from_claude_dir
+    return (session_files,)
 
 
 @app.cell
-def _(mo):
-    # Run pipeline button (separate from load)
-    run_button = mo.ui.run_button(label="Run Pipeline", full_width=True)
-    return (run_button,)
+def _(mo, session_files):
+    mo.stop(not session_files)
 
+    # Create table data for selection
+    table_data = [
+        {
+            "project": s["project"],
+            "modified": s["modified"],
+            "size_kb": s["size_kb"],
+        }
+        for s in session_files[:100]  # Limit to 100 most recent
+    ]
 
-@app.cell
-def _(
-    api_key_input,
-    load_status,
-    local_limit,
-    mo,
-    run_button,
-    sessions_info,
-    transcripts,
-    workers_input,
-):
-    # Sidebar with configuration
-    sidebar_content = mo.vstack([
-        mo.md("## Configuration"),
-        api_key_input,
-        mo.md("[Get your API key →](https://wandb.ai/authorize)"),
-        mo.md("---"),
-        mo.md("## Sessions"),
-        sessions_info,
-        load_status if transcripts else None,
-        mo.md("---") if transcripts else None,
-        local_limit if transcripts else None,
-        workers_input if transcripts else None,
-        mo.md("---") if transcripts else None,
-        run_button if transcripts else None,
+    session_table = mo.ui.table(
+        data=table_data,
+        selection="multi",
+        label=f"Select sessions to analyze ({len(session_files)} available)",
+    )
+
+    mo.vstack([
+        mo.md("## 1. Select Sessions"),
+        mo.md(f"Found **{len(session_files)} sessions** in `~/.claude/projects/`"),
+        session_table,
+        mo.md("*Select rows to include in analysis. Newest sessions shown first.*"),
     ])
 
-    return (sidebar_content,)
+    return session_table, table_data
+
+
+@app.cell
+def _(mo, session_files, session_table):
+    mo.stop(not session_table.value)
+
+    # Get selected session files
+    selected_indices = [row["index"] for row in session_table.value] if session_table.value else []
+    selected_files = [session_files[i]["file"] for i in selected_indices]
+
+    mo.md(f"**{len(selected_files)} sessions selected**")
+
+    return selected_files, selected_indices
+
+
+@app.cell
+def _(mo, selected_files):
+    mo.stop(not selected_files)
+
+    # Load button
+    load_button = mo.ui.run_button(label=f"Load {len(selected_files)} Sessions")
+    load_button
+
+    return (load_button,)
+
+
+@app.cell
+def _(load_button, mo, selected_files):
+    mo.stop(not load_button.value)
+
+    from insights.pipeline import parse_jsonl_session
+
+    # Load the selected sessions
+    transcripts = []
+    for f in selected_files:
+        try:
+            t = parse_jsonl_session(f)
+            if t["messages"]:
+                transcripts.append(t)
+        except Exception:
+            pass
+
+    mo.callout(f"Loaded {len(transcripts)} sessions with messages", kind="success")
+
+    return parse_jsonl_session, transcripts
 
 
 @app.cell
 def _(mo):
-    # Main content header
     mo.md(
-        r"""
-        # Claude Code Insights Pipeline
+        """
+        ---
+        ## 2. How the Pipeline Works
 
-        This notebook analyzes your Claude Code sessions and generates an insights report.
-
-        1. **Enter your W&B API key** in the sidebar
-        2. **Load your sessions** from `~/.claude/projects`
-        3. **Run the pipeline** to generate your report
+        The analysis happens in four stages. Each stage transforms the data for the next.
         """
     )
     return
@@ -167,85 +191,186 @@ def _(mo):
     mo.mermaid(
         """
         flowchart LR
-            A[Sessions] --> B[Facets]
-            B --> C[Aggregate]
-            C --> D[7 Parallel Prompts]
-            D --> E[Synthesis]
-            E --> F[HTML Report]
+            A[Your Sessions] --> B[Stage 1: Extract Facets]
+            B --> C[Stage 2: Aggregate]
+            C --> D[Stage 3: Analyze]
+            D --> E[Stage 4: Synthesize]
+            E --> F[Report]
 
-            style A fill:#e1f5fe
-            style F fill:#c8e6c9
-            style D fill:#fff3e0
+            style A fill:#e3f2fd
+            style F fill:#e8f5e9
         """
     )
     return
 
 
 @app.cell
-def _(
-    api_key_input,
-    mo,
-    run_button,
-    transcripts,
-    workers_input,
-):
-    mo.stop(not run_button.value, mo.md("*Load sessions and click 'Run Pipeline' to start*"))
+def _(mo):
+    # Show what each stage does
+    mo.accordion({
+        "Stage 1: Facet Extraction (LLM)": mo.vstack([
+            mo.md("""
+Each session gets analyzed individually. The LLM extracts structured "facets":
 
-    if not api_key_input.value:
-        mo.stop(True, mo.callout("Please enter your W&B API Key in the sidebar.", kind="warn"))
+- **Goal**: What were you trying to do?
+- **Outcome**: Did it work? (fully/mostly/partially/not achieved)
+- **Satisfaction**: How did you seem to feel about it?
+- **Friction**: What went wrong? (misunderstood request, buggy code, wrong approach, etc.)
 
-    if not transcripts:
-        mo.stop(True, mo.callout("Please load sessions first.", kind="warn"))
+Here's a snippet of the prompt:
+            """),
+            mo.md("""
+```
+Analyze this Claude Code session and extract structured facets.
 
-    from insights.pipeline import init_weave, run_insights_pipeline, get_weave_url
+CRITICAL GUIDELINES:
 
-    # Initialize Weave with hardcoded project name
-    weave_url = init_weave("claude-code-insights")
+1. goal_categories: Count ONLY what the USER explicitly asked for.
+   - DO NOT count Claude's autonomous codebase exploration
+   - ONLY count when user says "can you...", "please...", "I need..."
 
-    mo.md(f"**Weave Traces:** [{weave_url}]({weave_url})")
+2. user_satisfaction_counts: Base ONLY on explicit user signals.
+   - "Yay!", "great!", "perfect!" → happy
+   - "thanks", "looks good" → satisfied
+   - "that's not right", "try again" → dissatisfied
 
-    return init_weave, run_insights_pipeline, get_weave_url, weave_url
+3. friction_counts: Be specific about what went wrong.
+   - misunderstood_request: Claude interpreted incorrectly
+   - wrong_approach: Right goal, wrong solution method
+   - buggy_code: Code didn't work correctly
+```
+            """),
+        ]),
+
+        "Stage 2: Aggregation (No LLM)": mo.md("""
+This stage is pure Python - no LLM needed. It combines all the individual facets into totals:
+
+- Merge goal category counts across sessions
+- Sum up friction types
+- Calculate outcome distributions
+- Collect session summaries for the next stage
+
+Fast and deterministic. Just counting and merging dictionaries.
+        """),
+
+        "Stage 3: Map-Reduce Analysis (7 Parallel LLMs)": mo.vstack([
+            mo.md("""
+Seven prompts run in parallel, each analyzing your aggregated data from a different angle:
+            """),
+            mo.ui.table(
+                data=[
+                    {"Prompt": "project_areas", "Purpose": "What projects/areas you work on"},
+                    {"Prompt": "interaction_style", "Purpose": "How you interact with Claude"},
+                    {"Prompt": "what_works", "Purpose": "Your most impressive workflows"},
+                    {"Prompt": "friction_analysis", "Purpose": "Where things consistently go wrong"},
+                    {"Prompt": "suggestions", "Purpose": "Features and CLAUDE.md additions to try"},
+                    {"Prompt": "on_the_horizon", "Purpose": "Ambitious workflows for future models"},
+                    {"Prompt": "fun_ending", "Purpose": "A memorable moment from your sessions"},
+                ],
+                selection=None,
+            ),
+            mo.md("Running these in parallel makes it ~7x faster than running them one at a time."),
+        ]),
+
+        "Stage 4: Synthesis (LLM)": mo.md("""
+The final stage combines all seven analyses into a 4-part "At a Glance" summary:
+
+1. **What's working** - Your style and wins
+2. **What's hindering** - Claude's fault vs. user-side friction
+3. **Quick wins** - Features worth trying
+4. **Ambitious workflows** - What becomes possible with better models
+
+This runs last because it needs all the previous analyses as input.
+        """),
+    })
+    return
 
 
 @app.cell
-def _(
-    api_key_input,
-    mo,
-    run_button,
-    run_insights_pipeline,
-    transcripts,
-    weave_url,
-    workers_input,
-):
+def _(mo):
+    mo.md("---\n## 3. Run the Pipeline")
+    return
+
+
+@app.cell
+def _(mo):
+    workers_input = mo.ui.slider(
+        label="Parallel workers",
+        start=1,
+        stop=10,
+        value=5,
+        step=1,
+    )
+    workers_input
+    return (workers_input,)
+
+
+@app.cell
+def _(mo, transcripts):
+    mo.stop(not transcripts)
+    run_button = mo.ui.run_button(label="Run Pipeline")
+    run_button
+    return (run_button,)
+
+
+@app.cell
+def _(api_key_input, mo, run_button, transcripts, workers_input):
     mo.stop(not run_button.value)
 
-    # Create output area for logs
+    if not api_key_input.value:
+        mo.stop(True, mo.callout("Enter your W&B API key at the top of the page.", kind="warn"))
+
+    if not transcripts:
+        mo.stop(True, mo.callout("Load some sessions first.", kind="warn"))
+
+    from insights.pipeline import init_weave, run_insights_pipeline
+
+    # Initialize Weave
+    weave_url = init_weave("claude-code-insights")
+
+    mo.vstack([
+        mo.md(f"**Traces:** [{weave_url}]({weave_url})"),
+        mo.md("Running pipeline..."),
+    ])
+
+    return init_weave, run_insights_pipeline, weave_url
+
+
+@app.cell
+def _(api_key_input, mo, run_button, run_insights_pipeline, transcripts, weave_url, workers_input):
+    mo.stop(not run_button.value)
+
     logs = []
 
-    def log_message(msg: str):
+    def log(msg):
         logs.append(msg)
 
-    # Run the pipeline with logging
     html_bytes = run_insights_pipeline(
         transcripts=transcripts,
         api_key=api_key_input.value,
         workers=workers_input.value,
-        log=log_message,
+        log=log,
     )
 
     html_report = html_bytes.decode("utf-8")
 
-    # Show logs and success message
     mo.vstack([
         mo.callout(
-            mo.md(f"**Pipeline complete!** View traces: [{weave_url}]({weave_url})"),
+            mo.md(f"Done! [View traces]({weave_url})"),
             kind="success"
         ),
-        mo.md("### Pipeline Logs"),
-        mo.md(f"```\n{chr(10).join(logs)}\n```"),
+        mo.accordion({
+            "Pipeline logs": mo.md(f"```\n{chr(10).join(logs)}\n```"),
+        }),
     ])
 
-    return html_bytes, html_report, logs, log_message
+    return html_bytes, html_report, log, logs
+
+
+@app.cell
+def _(mo):
+    mo.md("---\n## 4. Your Report")
+    return
 
 
 @app.cell
@@ -253,18 +378,14 @@ def _(html_bytes, html_report, mo, run_button):
     mo.stop(not run_button.value)
     mo.stop(not html_report)
 
-    # Download button
     download = mo.download(
         data=html_bytes,
         filename="claude_code_insights.html",
         mimetype="text/html",
-        label="Download HTML Report",
+        label="Download Report",
     )
 
-    mo.hstack([
-        download,
-        mo.md(f"*Report size: {len(html_bytes) / 1024:.1f} KB*"),
-    ], justify="start", gap=2)
+    mo.hstack([download, mo.md(f"*{len(html_bytes) / 1024:.0f} KB*")])
 
     return (download,)
 
@@ -274,15 +395,7 @@ def _(html_report, mo, run_button):
     mo.stop(not run_button.value)
     mo.stop(not html_report)
 
-    # Show the HTML report inline
     mo.Html(html_report)
-    return
-
-
-@app.cell
-def _(mo, sidebar_content):
-    # Layout with sidebar
-    mo.sidebar(sidebar_content)
     return
 
 
