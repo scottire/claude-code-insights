@@ -10,11 +10,14 @@
 """
 Claude Code Insights Pipeline - Marimo Notebook
 
+An educational notebook that teaches the /insights pipeline architecture
+while also letting you run it on your own Claude Code sessions.
+
 Run with:
     uvx marimo edit --sandbox insights_sandbox.py
 
 Or from GitHub:
-    uvx marimo edit --sandbox https://raw.githubusercontent.com/USER/REPO/main/insights_sandbox.py
+    uvx marimo edit --sandbox https://raw.githubusercontent.com/scottire/claude-code-insights/main/insights_sandbox.py
 """
 
 import marimo
@@ -32,25 +35,63 @@ def _():
 @app.cell
 def _(mo):
     mo.md(
-        """
+        r"""
         # Claude Code Insights Pipeline
 
-        This notebook analyzes your Claude Code session transcripts and generates
-        an insights report showing:
+        This notebook replicates the `/insights` command from Claude Code, teaching you about:
 
-        - **What you work on** - Project areas and task types
-        - **How you use Claude** - Interaction patterns and style
-        - **What's working** - Impressive workflows and wins
-        - **Where things go wrong** - Friction points and issues
-        - **Suggestions** - Features to try and workflow improvements
+        - **Facet extraction** - Extracting structured data from unstructured transcripts
+        - **Aggregation** - Combining individual facets into statistics
+        - **Map-reduce patterns** - Running parallel LLM analysis prompts
+        - **Synthesis** - Combining multiple analyses into a unified report
+        """
+    )
+    return
 
+
+@app.cell
+def _(mo):
+    mo.mermaid(
+        """
+        flowchart TD
+            A[Raw Sessions] --> B[Stage 1: Facet Extraction]
+            B --> C[Stage 2: Aggregate]
+            C --> D[Stage 3: Map-Reduce Analysis]
+            D --> E1[project_areas]
+            D --> E2[interaction_style]
+            D --> E3[what_works]
+            D --> E4[friction_analysis]
+            D --> E5[suggestions]
+            D --> E6[on_the_horizon]
+            D --> E7[fun_ending]
+            E1 --> F[Stage 4: Synthesis]
+            E2 --> F
+            E3 --> F
+            E4 --> F
+            E5 --> F
+            E6 --> F
+            E7 --> F
+            F --> G[HTML Report]
+
+            style A fill:#e1f5fe
+            style G fill:#c8e6c9
+            style D fill:#fff3e0
+        """
+    )
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md(
+        """
         ## Getting Started
 
         1. **Get your W&B API Key**: Go to [wandb.ai/settings](https://wandb.ai/settings) and copy your API key
         2. **Configure below**: Enter your API key and choose a transcript source
         3. **Run the pipeline**: Click "Run Pipeline" to generate your report
 
-        ## Viewing Weave Traces
+        ### Viewing Weave Traces
 
         After running, visit [wandb.ai](https://wandb.ai) → your project → "Weave" tab to see all traced LLM calls.
         """
@@ -60,7 +101,7 @@ def _(mo):
 
 @app.cell
 def _(mo):
-    mo.md("## Configuration")
+    mo.md("---\n## Configuration")
     return
 
 
@@ -153,6 +194,101 @@ def _(mo, source_tabs):
 
 @app.cell
 def _(mo):
+    mo.md(
+        """
+        ---
+        ## Pipeline Stages
+
+        Before running, let's understand what each stage does:
+        """
+    )
+    return
+
+
+@app.cell
+def _(mo):
+    mo.accordion({
+        "Stage 1: Facet Extraction": mo.md("""
+**What it does:** Extracts structured "facets" from each session transcript.
+
+**What's a Facet?** A facet captures key aspects of a session:
+- `underlying_goal`: What the user fundamentally wanted
+- `goal_categories`: Categorized counts of user requests
+- `outcome`: Whether goals were achieved (fully/mostly/partially/not)
+- `satisfaction`: User satisfaction signals (happy/satisfied/frustrated)
+- `friction`: What went wrong and why
+- `session_type`: Nature of the interaction
+
+**Processing notes:**
+- Sessions >30KB are chunked and summarized first
+- Warmup/minimal sessions are filtered out
+- Requires minimum 2 user messages and 1+ minute duration
+        """),
+
+        "Stage 2: Aggregation (Pure Python)": mo.md("""
+**What it does:** Combines individual facets into aggregate statistics. **No LLM needed!**
+
+```python
+# For count dictionaries:
+for key, count in source.items():
+    target[key] = target.get(key, 0) + count
+
+# Top-N ranking:
+top_goals = sorted(goal_categories.items(), key=lambda x: x[1], reverse=True)[:8]
+```
+
+**What gets aggregated:**
+- Goal categories: Merged and ranked
+- Friction types: Merged and ranked
+- Outcomes: Distribution counts
+- Satisfaction signals: Merged counts
+- Session summaries: Collected for analysis
+        """),
+
+        "Stage 3: Map-Reduce Analysis": mo.md("""
+**What it does:** Runs **7 parallel LLM prompts** that each analyze the aggregated data from a different angle.
+
+```python
+with ThreadPoolExecutor(max_workers=7) as executor:
+    futures = {
+        executor.submit(run_analysis_prompt, name, data): name
+        for name in ANALYSIS_PROMPTS
+    }
+```
+
+| Prompt | Purpose |
+|--------|---------|
+| `project_areas` | Identify 4-5 areas user works on |
+| `interaction_style` | Describe how user interacts with Claude |
+| `what_works` | Find 3 impressive workflows |
+| `friction_analysis` | Categorize friction with examples |
+| `suggestions` | CLAUDE.md additions, features to try |
+| `on_the_horizon` | Future opportunities with copyable prompts |
+| `fun_ending` | Find a memorable moment |
+        """),
+
+        "Stage 4: At-a-Glance Synthesis": mo.md("""
+**What it does:** Combines all 7 analysis outputs into a unified 4-part narrative.
+
+1. **What's working** - User's unique style and impactful accomplishments
+2. **What's hindering** - Claude's fault vs user-side friction
+3. **Quick wins** - Specific features to try
+4. **Ambitious workflows** - What becomes possible with better models
+
+This runs **sequentially** after all parallel prompts complete.
+        """),
+    })
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md("---\n## Run Pipeline")
+    return
+
+
+@app.cell
+def _(mo):
     run_button = mo.ui.run_button(label="Run Pipeline")
     run_button
     return (run_button,)
@@ -167,8 +303,6 @@ def _(
     mo,
     run_button,
     source_tabs,
-    weave_project_input,
-    workers_input,
 ):
     import json
     from pathlib import Path
@@ -273,7 +407,7 @@ def _(html_bytes, html_report, mo, run_button):
     mo.stop(not run_button.value)
     mo.stop(not html_report)
 
-    mo.md("## Results")
+    mo.md("---\n## Results")
     return
 
 
@@ -313,27 +447,32 @@ def _(mo):
         """
         ---
 
-        ## About This Pipeline
+        ## Educational Notes
 
-        The Claude Code Insights pipeline runs these stages:
+        ### Why This Architecture?
 
-        1. **Facet Extraction** - Analyzes each session transcript to extract structured data about goals, outcomes, friction, and satisfaction
-        2. **Aggregation** - Combines facets into statistics (pure Python, no LLM)
-        3. **Analysis** - Runs 7 parallel LLM prompts for deep analysis:
-           - Project areas
-           - Interaction style
-           - What works
-           - Friction analysis
-           - Suggestions
-           - On the horizon
-           - Fun ending
-        4. **Synthesis** - Generates the "At a Glance" summary
+        1. **Facet extraction** is the slowest step - it processes each transcript individually. Caching is important here.
 
-        All LLM calls are traced via [Weave](https://wandb.ai/site/weave) so you can inspect inputs, outputs, and latencies.
+        2. **Aggregation** is pure Python - fast and deterministic. No LLM needed because we're just counting and merging.
+
+        3. **Map-reduce analysis** parallelizes well because each prompt is independent. Running 7 prompts in parallel is ~7x faster than sequential.
+
+        4. **Synthesis** must run last because it needs all analysis outputs as input.
+
+        ### Key Patterns
+
+        - **Structured output**: All LLM calls use `response_format={"type": "json_object"}` for reliable parsing
+        - **Prompt templates**: Prompts are inlined in the package for portability
+        - **Progressive refinement**: Raw data → facets → aggregates → analysis → synthesis
+        - **Weave tracing**: All LLM calls are traced for observability
 
         ### Finding Your Claude Code Sessions
 
-        Sessions are stored in `~/.claude/projects/*/sessions/`. Each session is a JSONL file with the full conversation history.
+        Sessions are stored in `~/.claude/projects/*/`. Each session is a JSONL file with the full conversation history including:
+        - User messages
+        - Assistant responses
+        - Tool calls and results
+        - Timestamps and metadata
         """
     )
     return
