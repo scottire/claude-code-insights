@@ -88,7 +88,7 @@ def _(mo):
         ## Getting Started
 
         1. **Get your W&B API Key**: Go to [wandb.ai/settings](https://wandb.ai/settings) and copy your API key
-        2. **Configure below**: Enter your API key and choose a transcript source
+        2. **Configure below**: Enter your API key and number of sessions
         3. **Run the pipeline**: Click "Run Pipeline" to generate your report
 
         ### Viewing Weave Traces
@@ -125,35 +125,6 @@ def _(mo):
         value=5,
         step=1,
     )
-
-    mo.vstack([
-        api_key_input,
-        weave_project_input,
-        workers_input,
-    ])
-    return api_key_input, weave_project_input, workers_input
-
-
-@app.cell
-def _(mo):
-    mo.md("## Transcript Source")
-    return
-
-
-@app.cell
-def _(mo):
-    source_tabs = mo.ui.tabs({
-        "Local Sessions": "local",
-        "Upload File": "upload",
-        "Paste JSON": "paste",
-    })
-    source_tabs
-    return (source_tabs,)
-
-
-@app.cell
-def _(mo, source_tabs):
-    # Local sessions options
     local_limit = mo.ui.slider(
         label="Number of sessions to analyze",
         start=5,
@@ -162,34 +133,30 @@ def _(mo, source_tabs):
         step=5,
     )
 
-    # File upload
-    file_upload = mo.ui.file(
-        label="Upload JSONL or JSON transcript file",
-        filetypes=[".jsonl", ".json"],
-        multiple=True,
-    )
+    mo.vstack([
+        api_key_input,
+        weave_project_input,
+        mo.hstack([workers_input, local_limit]),
+    ])
+    return api_key_input, local_limit, weave_project_input, workers_input
 
-    # Paste JSON
-    json_paste = mo.ui.text_area(
-        label="Paste transcript JSON",
-        placeholder='[{"session_id": "...", "messages": [...]}]',
-        rows=10,
-        full_width=True,
-    )
 
-    # Show appropriate UI based on selected tab
-    if source_tabs.value == "local":
-        source_ui = mo.vstack([
-            mo.md("Analyze sessions from `~/.claude/projects/`"),
-            local_limit,
-        ])
-    elif source_tabs.value == "upload":
-        source_ui = file_upload
+@app.cell
+def _(local_limit, mo):
+    from pathlib import Path
+
+    claude_dir = Path.home() / ".claude" / "projects"
+
+    if not claude_dir.exists():
+        mo.callout(
+            f"Claude projects directory not found: {claude_dir}",
+            kind="danger"
+        )
     else:
-        source_ui = json_paste
-
-    source_ui
-    return file_upload, json_paste, local_limit, source_ui
+        from insights.pipeline import load_transcripts_from_claude_dir
+        transcripts = load_transcripts_from_claude_dir(claude_dir, limit=local_limit.value)
+        mo.md(f"**Found {len(transcripts)} sessions** in `~/.claude/projects/`")
+    return Path, claude_dir, load_transcripts_from_claude_dir, transcripts
 
 
 @app.cell
@@ -297,16 +264,12 @@ def _(mo):
 @app.cell
 def _(
     api_key_input,
-    file_upload,
-    json_paste,
-    local_limit,
     mo,
     run_button,
-    source_tabs,
+    transcripts,
+    weave_project_input,
+    workers_input,
 ):
-    import json
-    from pathlib import Path
-
     mo.stop(not run_button.value, mo.md("*Click 'Run Pipeline' to start*"))
 
     # Validate API key
@@ -316,71 +279,8 @@ def _(
             kind="warn"
         ))
 
-    # Load transcripts based on source
-    transcripts = []
-
-    if source_tabs.value == "local":
-        claude_dir = Path.home() / ".claude" / "projects"
-        if not claude_dir.exists():
-            mo.stop(True, mo.callout(
-                f"Claude projects directory not found: {claude_dir}",
-                kind="danger"
-            ))
-
-        from insights.pipeline import load_transcripts_from_claude_dir
-        transcripts = load_transcripts_from_claude_dir(claude_dir, limit=local_limit.value)
-
-    elif source_tabs.value == "upload":
-        if not file_upload.value:
-            mo.stop(True, mo.callout("Please upload a transcript file.", kind="warn"))
-
-        from insights.pipeline import parse_jsonl_session
-
-        for uploaded_file in file_upload.value:
-            content = uploaded_file.contents.decode("utf-8")
-            if uploaded_file.name.endswith(".jsonl"):
-                # Write to temp file and parse
-                import tempfile
-                with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
-                    f.write(content)
-                    temp_path = Path(f.name)
-                transcripts.append(parse_jsonl_session(temp_path))
-                temp_path.unlink()
-            else:
-                data = json.loads(content)
-                if isinstance(data, list):
-                    transcripts.extend(data)
-                else:
-                    transcripts.append(data)
-
-    else:  # paste
-        if not json_paste.value.strip():
-            mo.stop(True, mo.callout("Please paste transcript JSON.", kind="warn"))
-
-        data = json.loads(json_paste.value)
-        if isinstance(data, list):
-            transcripts = data
-        else:
-            transcripts = [data]
-
     if not transcripts:
         mo.stop(True, mo.callout("No transcripts found to analyze.", kind="warn"))
-
-    mo.md(f"**Loaded {len(transcripts)} transcripts**")
-    return (json, Path, transcripts,)
-
-
-@app.cell
-def _(
-    api_key_input,
-    mo,
-    run_button,
-    transcripts,
-    weave_project_input,
-    workers_input,
-):
-    mo.stop(not run_button.value)
-    mo.stop(not transcripts)
 
     from insights.pipeline import init_weave, run_insights_pipeline
 
