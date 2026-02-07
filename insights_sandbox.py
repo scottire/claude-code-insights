@@ -19,7 +19,7 @@ Run with:
 
 import marimo
 
-__generated_with = "0.10.0"
+__generated_with = "0.19.8"
 app = marimo.App(width="full")
 
 
@@ -28,7 +28,8 @@ def _():
     import marimo as mo
     from pathlib import Path
     from datetime import datetime
-    return mo, Path, datetime
+
+    return Path, datetime, mo
 
 
 @app.cell
@@ -40,14 +41,7 @@ def _(mo):
         placeholder="Paste your API key here",
         full_width=True,
     )
-    workers_input = mo.ui.slider(
-        label="Parallel workers",
-        start=1,
-        stop=10,
-        value=5,
-        step=1,
-    )
-    return api_key_input, workers_input
+    return (api_key_input,)
 
 
 @app.cell
@@ -78,7 +72,6 @@ def _(claude_dir, claude_dir_exists, datetime):
     # Sort by modified time (newest first)
     _session_files.sort(key=lambda x: x["modified"], reverse=True)
     session_files = _session_files
-
     return (session_files,)
 
 
@@ -99,19 +92,12 @@ def _(mo, session_files):
         selection="multi",
         label=f"Select sessions ({len(session_files)} available)",
     ) if session_files else None
-
     return (session_table,)
 
 
 @app.cell
-def _(mo, session_files, session_table):
-    # Get selected session files
-    if session_table and session_table.value:
-        _selected_indices = [row["index"] for row in session_table.value]
-        selected_files = [session_files[i]["file"] for i in _selected_indices]
-    else:
-        selected_files = []
-
+def _(session_table):
+    selected_files = [row['project'] for row in session_table.value]
     return (selected_files,)
 
 
@@ -126,7 +112,7 @@ def _(mo, selected_files):
 
 
 @app.cell
-def _(load_button, mo, selected_files):
+def _(load_button, selected_files):
     # Load the selected sessions
     transcripts = []
 
@@ -139,7 +125,6 @@ def _(load_button, mo, selected_files):
                     transcripts.append(_t)
             except Exception:
                 pass
-
     return (transcripts,)
 
 
@@ -160,11 +145,8 @@ def _(
     load_button,
     mo,
     run_button,
-    selected_files,
     session_files,
-    session_table,
     transcripts,
-    workers_input,
 ):
     # Sidebar content
     _sidebar = mo.vstack([
@@ -176,7 +158,6 @@ def _(
         mo.md(f"`{claude_dir}`"),
         mo.md(f"**{len(session_files)}** sessions found") if session_files else mo.callout("No sessions found", kind="warn"),
         mo.md("---"),
-        workers_input,
         load_button,
         mo.md(f"*{len(transcripts)} loaded*") if transcripts else None,
         run_button if transcripts else None,
@@ -188,15 +169,13 @@ def _(
 
 @app.cell
 def _(mo):
-    mo.md(
-        """
-        # Claude Code Insights
+    mo.md("""
+    # Claude Code Insights
 
-        Analyze your Claude Code sessions to see what's working, where things go wrong, and get suggestions.
+    Analyze your Claude Code sessions to see what's working, where things go wrong, and get suggestions.
 
-        **Select sessions from the table below**, then click **Load** and **Run Pipeline** in the sidebar.
-        """
-    )
+    **Select sessions from the table below**, then click **Load** and **Run Pipeline** in the sidebar.
+    """)
     return
 
 
@@ -215,7 +194,10 @@ def _(mo, session_table):
 
 @app.cell
 def _(mo):
-    mo.md("---\n## How It Works")
+    mo.md("""
+    ---
+    ## How It Works
+    """)
     return
 
 
@@ -242,35 +224,35 @@ def _(mo):
     mo.accordion({
         "Stage 1: Facet Extraction": mo.vstack([
             mo.md("""
-Each session gets analyzed by an LLM to extract structured data:
+    Each session gets analyzed by an LLM to extract structured data:
 
-- **Goal**: What were you trying to do?
-- **Outcome**: Did it work?
-- **Friction**: What went wrong?
+    - **Goal**: What were you trying to do?
+    - **Outcome**: Did it work?
+    - **Friction**: What went wrong?
 
-The prompt tells the LLM to only count what *you* asked for, not what Claude decided to do on its own:
+    The prompt tells the LLM to only count what *you* asked for, not what Claude decided to do on its own:
             """),
             mo.md("""
-```
-goal_categories: Count ONLY what the USER explicitly asked for.
-  - DO NOT count Claude's autonomous codebase exploration
-  - ONLY count when user says "can you...", "please...", "I need..."
+    ```
+    goal_categories: Count ONLY what the USER explicitly asked for.
+      - DO NOT count Claude's autonomous codebase exploration
+      - ONLY count when user says "can you...", "please...", "I need..."
 
-friction_counts: Be specific about what went wrong.
-  - misunderstood_request: Claude interpreted incorrectly
-  - wrong_approach: Right goal, wrong solution
-  - buggy_code: Code didn't work
-```
+    friction_counts: Be specific about what went wrong.
+      - misunderstood_request: Claude interpreted incorrectly
+      - wrong_approach: Right goal, wrong solution
+      - buggy_code: Code didn't work
+    ```
             """),
         ]),
 
         "Stage 2: Aggregation": mo.md("""
-Pure Python, no LLM. Combines facets into totals:
+    Pure Python, no LLM. Combines facets into totals:
 
-- Merge goal counts across sessions
-- Sum friction types
-- Calculate outcome distributions
-- Collect summaries for the next stage
+    - Merge goal counts across sessions
+    - Sum friction types
+    - Calculate outcome distributions
+    - Collect summaries for the next stage
         """),
 
         "Stage 3: Parallel Analysis": mo.vstack([
@@ -290,12 +272,12 @@ Pure Python, no LLM. Combines facets into totals:
         ]),
 
         "Stage 4: Synthesis": mo.md("""
-Combines all seven analyses into a summary:
+    Combines all seven analyses into a summary:
 
-1. **What's working** - Your style and wins
-2. **What's hindering** - Problems on both sides
-3. **Quick wins** - Easy things to try
-4. **Ambitious workflows** - What's coming with better models
+    1. **What's working** - Your style and wins
+    2. **What's hindering** - Problems on both sides
+    3. **Quick wins** - Easy things to try
+    4. **Ambitious workflows** - What's coming with better models
         """),
     })
     return
@@ -316,12 +298,18 @@ def _(api_key_input, mo, run_button, transcripts):
     weave_url = init_weave("claude-code-insights")
 
     mo.md(f"**Traces:** [{weave_url}]({weave_url})")
-
-    return init_weave, run_insights_pipeline, weave_url
+    return run_insights_pipeline, weave_url
 
 
 @app.cell
-def _(api_key_input, mo, run_button, run_insights_pipeline, transcripts, weave_url, workers_input):
+def _(
+    api_key_input,
+    mo,
+    run_button,
+    run_insights_pipeline,
+    transcripts,
+    weave_url,
+):
     mo.stop(not run_button.value)
 
     _logs = []
@@ -332,7 +320,7 @@ def _(api_key_input, mo, run_button, run_insights_pipeline, transcripts, weave_u
     html_bytes = run_insights_pipeline(
         transcripts=transcripts,
         api_key=api_key_input.value,
-        workers=workers_input.value,
+        workers=7,
         log=_log,
     )
 
@@ -343,13 +331,15 @@ def _(api_key_input, mo, run_button, run_insights_pipeline, transcripts, weave_u
         mo.callout(mo.md(f"Done! [View traces]({weave_url})"), kind="success"),
         mo.accordion({"Pipeline logs": mo.md(f"```\n{pipeline_logs}\n```")}),
     ])
+    return html_bytes, html_report
 
-    return html_bytes, html_report, pipeline_logs
 
-
-@app.cell
+@app.cell(hide_code=True)
 def _(mo):
-    mo.md("---\n## Report")
+    mo.md("""
+    ---
+    ## Report
+    """)
     return
 
 
@@ -366,8 +356,7 @@ def _(html_bytes, html_report, mo, run_button):
     )
 
     mo.hstack([download_button, mo.md(f"*{len(html_bytes) / 1024:.0f} KB*")])
-
-    return (download_button,)
+    return
 
 
 @app.cell
