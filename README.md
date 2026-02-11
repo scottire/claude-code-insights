@@ -1,78 +1,24 @@
 # Claude Code Insights
 
-Analyze your Claude Code session transcripts and generate insight reports about usage patterns, friction points, and suggestions for improvement.
+Reverse-engineered `/insights` pipeline from Claude Code. Analyzes your session transcripts and generates a report about how you work.
 
-## Features
-
-- **Facet Extraction** - Analyzes each session to extract goals, outcomes, friction, and satisfaction
-- **Aggregation** - Combines facets into statistics
-- **Analysis** - Runs 7 parallel LLM prompts for deep analysis (project areas, interaction style, what works, friction, suggestions, horizon, fun ending)
-- **Synthesis** - Generates an "At a Glance" summary
-- **HTML Report** - Beautiful, interactive report with charts and copy-to-clipboard suggestions
-
-## Quick Start (Marimo Notebook)
-
-Run the interactive notebook in sandbox mode:
+## Run it
 
 ```bash
-uvx marimo edit --sandbox https://raw.githubusercontent.com/scottire/claude-code-insights/main/insights_sandbox.py
+uvx marimo edit --sandbox 'https://github.com/scottire/claude-code-insights/blob/main/notebook.py'
 ```
 
-## Installation
+You'll need a [W&B API key](https://wandb.ai/authorize).
 
-```bash
-pip install git+https://github.com/scottire/claude-code-insights.git
-```
+## What it does
 
-## CLI Usage
+1. **Extract facets** - LLM reads each session, outputs structured JSON (goals, outcomes, friction)
+2. **Aggregate** - Pure Python, merges counts across sessions
+3. **Analyze** - 7 prompts run in parallel (project areas, what works, friction, suggestions, etc.)
+4. **Synthesize** - Condenses into a summary report
 
-```bash
-# Analyze your local Claude Code sessions
-insights run-local --limit 10
+The notebook lets you step through each stage or just run the whole pipeline.
 
-# Or specify a custom path
-insights run-all -t ~/.claude/projects -o output/report.json
-```
+## Traces
 
-## Python API
-
-```python
-from insights import init_weave, run_insights_pipeline, load_transcripts
-from pathlib import Path
-
-# Initialize Weave tracing (optional but recommended)
-init_weave("my-project")
-
-# Load transcripts
-transcripts, date_range = load_transcripts(
-    Path.home() / ".claude" / "projects",
-    limit=10
-)
-
-# Run pipeline
-html_bytes = run_insights_pipeline(
-    transcripts,
-    api_key="your-wandb-api-key",  # or set WANDB_API_KEY env var
-    workers=5
-)
-
-# Save report
-Path("report.html").write_bytes(html_bytes)
-```
-
-## Requirements
-
-- Python 3.11+
-- W&B API key (get from [wandb.ai/settings](https://wandb.ai/settings))
-
-## Viewing Traces
-
-All LLM calls are traced via [Weave](https://wandb.ai/site/weave). After running:
-
-1. Go to [wandb.ai](https://wandb.ai)
-2. Navigate to your project (default: `claude-code-insights`)
-3. Click "Weave" tab to see all traced calls
-
-## License
-
-MIT
+All LLM calls are traced via [Weave](https://wandb.ai/site/weave). The final report renders as a view on the pipeline call.
