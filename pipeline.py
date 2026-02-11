@@ -1,11 +1,17 @@
 """
-CLI tool for the Claude Code Insights Pipeline.
+Claude Code Insights Pipeline.
 
 This replicates the /insights command from Claude Code:
 1. Extract facets from session transcripts
 2. Aggregate facets into statistics
 3. Run 7 analysis prompts in parallel (map-reduce)
 4. Synthesize at-a-glance summary
+
+Usage:
+    from pipeline import run_insights_pipeline, load_transcripts, parse_jsonl_session
+
+    transcripts, date_range = load_transcripts(Path.home() / ".claude" / "projects", limit=10)
+    html_bytes = run_insights_pipeline(transcripts, len(transcripts), date_range)
 """
 
 import json
@@ -13,23 +19,12 @@ import os
 import re
 from concurrent.futures import as_completed
 from datetime import datetime
-from functools import reduce
 from pathlib import Path
-from typing import Annotated, Any, Literal
+from typing import Callable
 
-from weave import Content
-
-import typer
 import weave
 from openai import OpenAI
-from rich.console import Console
-from rich.progress import Progress, SpinnerColumn, TextColumn
-
-# Initialize Weave for tracing
-weave.init("claude-code-insights")
-
-app = typer.Typer(help="Claude Code Insights Pipeline CLI")
-console = Console()
+from weave import Content
 
 # ============================================================================
 # Parallel Execution Utility
@@ -37,45 +32,42 @@ console = Console()
 
 def parallel_llm_map(
     items: list,
-    worker_fn,
-    description: str = "Processing",
-    max_workers: int = 10
+    worker_fn: Callable,
+    max_workers: int = 10,
+    on_progress: Callable[[int, int], None] | None = None
 ) -> tuple[list, list]:
     """
-    Execute LLM calls in parallel with progress tracking.
+    Execute LLM calls in parallel.
 
     Args:
         items: List of items to process
         worker_fn: Function that takes an item and returns a result (or raises)
-        description: Description for progress bar
         max_workers: Number of parallel workers
+        on_progress: Optional callback(completed, total) for progress updates
 
     Returns:
         Tuple of (results, errors) where errors contain {"error": str, "item": item}
     """
     results = []
     errors = []
+    completed = 0
+    total = len(items)
 
-    with Progress(
-        SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
-        console=console
-    ) as progress:
-        task = progress.add_task(f"{description}...", total=len(items))
+    with weave.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {executor.submit(worker_fn, item): item for item in items}
 
-        with weave.ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = {executor.submit(worker_fn, item): item for item in items}
+        for future in as_completed(futures):
+            item = futures[future]
+            try:
+                result = future.result()
+                if result is not None:
+                    results.append(result)
+            except Exception as e:
+                errors.append({"error": str(e), "item": item})
 
-            for future in as_completed(futures):
-                item = futures[future]
-                try:
-                    result = future.result()
-                    if result is not None:
-                        results.append(result)
-                except Exception as e:
-                    errors.append({"error": str(e), "item": item})
-                    console.print(f"[red]Error: {str(e)[:60]}...[/red]")
-                progress.advance(task)
+            completed += 1
+            if on_progress:
+                on_progress(completed, total)
 
     return results, errors
 
@@ -84,21 +76,26 @@ def parallel_llm_map(
 # LLM Client Setup
 # ============================================================================
 
-def get_client() -> OpenAI:
-    """Get OpenAI client configured for W&B inference."""
-    api_key = os.environ.get("WANDB_API_KEY")
-    if not api_key:
-        raise ValueError("WANDB_API_KEY environment variable required")
+def get_client(api_key: str | None = None) -> OpenAI:
+    """
+    Get OpenAI client configured for W&B inference.
+
+    Args:
+        api_key: W&B API key. If not provided, falls back to WANDB_API_KEY env var.
+    """
+    key = api_key or os.environ.get("WANDB_API_KEY")
+    if not key:
+        raise ValueError("API key required: pass api_key parameter or set WANDB_API_KEY env var")
     return OpenAI(
         base_url='https://api.inference.wandb.ai/v1',
-        api_key=api_key
+        api_key=key
     )
 
 MODEL = "zai-org/GLM-4.5"
 
-def call_llm(prompt: str, system: str = "") -> dict:
+def call_llm(prompt: str, system: str = "", api_key: str | None = None) -> dict:
     """Call LLM and parse JSON response."""
-    client = get_client()
+    client = get_client(api_key)
     messages = []
     if system:
         messages.append({"role": "system", "content": system})
@@ -272,8 +269,8 @@ def load_transcripts_from_claude_dir(claude_dir: Path, limit: int = None) -> lis
             transcript = parse_jsonl_session(jsonl_file)
             if transcript["messages"]:  # Only include non-empty sessions
                 transcripts.append(transcript)
-        except Exception as e:
-            console.print(f"[yellow]Warning: Could not parse {jsonl_file.name}: {e}[/yellow]")
+        except Exception:
+            pass  # Skip files that can't be parsed
 
     return transcripts
 
@@ -325,13 +322,13 @@ def chunk_transcript(transcript: str, max_size: int = 30000) -> list[str]:
 
 
 @weave.op(color="yellow")
-def summarize_chunk(chunk: str) -> str:
+def summarize_chunk(chunk: str, api_key: str | None = None) -> str:
     """Summarize a transcript chunk using LLM."""
     # Skip chunks that are too small to be meaningful
     if len(chunk.strip()) < 100:
         return ""
     prompt = load_prompt("summary") + chunk
-    result = call_llm(prompt)
+    result = call_llm(prompt, api_key=api_key)
     return result.get("summary", "")
 
 
@@ -372,7 +369,7 @@ def format_transcript_compact(transcript: dict) -> str:
 
 
 @weave.op(color="blue")
-def extract_facets_from_transcript(transcript: dict) -> dict | None:
+def extract_facets_from_transcript(transcript: dict, api_key: str | None = None) -> dict | None:
     """Extract facets from a single session transcript."""
     if should_skip_session(transcript):
         return None
@@ -385,7 +382,7 @@ def extract_facets_from_transcript(transcript: dict) -> dict | None:
         chunks = chunk_transcript(transcript_str)
         # Filter out chunks that are too small to be meaningful (< 100 chars)
         chunks = [c for c in chunks if len(c.strip()) >= 100]
-        summaries = [summarize_chunk(chunk) for chunk in chunks if chunk.strip()]
+        summaries = [summarize_chunk(chunk, api_key) for chunk in chunks if chunk.strip()]
         transcript_str = "\n\n---\n\n".join(summaries)
 
     # Build the prompt
@@ -399,7 +396,7 @@ RESPOND WITH ONLY A VALID JSON OBJECT matching this schema:
 {schema_str}
 """
 
-    result = call_llm(full_prompt)
+    result = call_llm(full_prompt, api_key=api_key)
     result["session_id"] = transcript.get("session_id", transcript.get("id", "unknown"))
     # Include timestamps for date range calculation
     result["start_time"] = transcript.get("start_time")
@@ -407,60 +404,6 @@ RESPOND WITH ONLY A VALID JSON OBJECT matching this schema:
     return result
 
 
-@app.command()
-def extract_facets(
-    input_path: Path = typer.Option(..., "--input", "-i", help="Input transcripts directory or file"),
-    output_path: Path = typer.Option(..., "--output", "-o", help="Output facets JSON file"),
-    limit: int = typer.Option(None, "--limit", "-l", help="Limit number of sessions to process"),
-    use_claude_dir: bool = typer.Option(False, "--claude-dir", "-c", help="Treat input as ~/.claude/projects directory"),
-    workers: int = typer.Option(10, "--workers", "-w", help="Number of parallel workers")
-):
-    """Extract facets from each transcript using LLM (parallel)."""
-    # Load transcripts
-    transcripts = []
-
-    if use_claude_dir or (input_path.is_dir() and (input_path / "projects").exists()):
-        # Load from Claude Code projects directory
-        projects_dir = input_path / "projects" if (input_path / "projects").exists() else input_path
-        console.print(f"[bold]Loading sessions from Claude projects directory...[/bold]")
-        transcripts = load_transcripts_from_claude_dir(projects_dir, limit=limit)
-    elif input_path.is_dir():
-        # Check for JSONL files first
-        jsonl_files = list(input_path.glob("*.jsonl"))
-        if jsonl_files:
-            for f in jsonl_files[:limit] if limit else jsonl_files:
-                try:
-                    transcripts.append(parse_jsonl_session(f))
-                except Exception as e:
-                    console.print(f"[yellow]Warning: Could not parse {f.name}: {e}[/yellow]")
-        else:
-            # Fall back to JSON files
-            json_files = list(input_path.glob("*.json"))
-            for f in json_files[:limit] if limit else json_files:
-                transcripts.append(json.loads(f.read_text()))
-    elif input_path.suffix == ".jsonl":
-        transcripts = [parse_jsonl_session(input_path)]
-    else:
-        data = json.loads(input_path.read_text())
-        if isinstance(data, list):
-            transcripts = data[:limit] if limit else data
-        else:
-            transcripts = [data]
-
-    # Filter out sessions that should be skipped
-    valid_transcripts = [t for t in transcripts if not should_skip_session(t)]
-    console.print(f"[bold]Processing {len(valid_transcripts)} sessions ({len(transcripts) - len(valid_transcripts)} skipped) with {workers} workers...[/bold]")
-
-    # Extract facets in parallel
-    facets, errors = parallel_llm_map(
-        items=valid_transcripts,
-        worker_fn=extract_facets_from_transcript,
-        description="Extracting facets",
-        max_workers=workers
-    )
-
-    output_path.write_text(json.dumps(facets, indent=2))
-    console.print(f"[green]Extracted {len(facets)} facets to {output_path} ({len(errors)} errors)[/green]")
 
 
 # ============================================================================
@@ -680,20 +623,6 @@ def aggregate_facets_impl(facets: list[dict], transcripts: list[dict] = None) ->
     return aggregated
 
 
-@app.command()
-def aggregate(
-    input_path: Path = typer.Option(..., "--input", "-i", help="Input facets JSON file"),
-    output_path: Path = typer.Option(..., "--output", "-o", help="Output aggregated JSON file")
-):
-    """Aggregate facets into statistics (pure Python, no LLM)."""
-    facets = json.loads(input_path.read_text())
-
-    console.print(f"[bold]Aggregating {len(facets)} facets...[/bold]")
-
-    aggregated = aggregate_facets_impl(facets)
-
-    output_path.write_text(json.dumps(aggregated, indent=2))
-    console.print(f"[green]Aggregated data saved to {output_path}[/green]")
 
 
 # ============================================================================
@@ -775,7 +704,7 @@ USER INSTRUCTIONS TO CLAUDE:
     color="green",
     call_display_name=lambda call: f"analyze:{call.inputs['prompt_name']}"
 )
-def run_analysis_prompt(prompt_name: str, aggregated: dict, facets: list[dict]) -> tuple[str, dict]:
+def run_analysis_prompt(prompt_name: str, aggregated: dict, facets: list[dict], api_key: str | None = None) -> tuple[str, dict]:
     """Run a single analysis prompt and return (name, result)."""
     prompt_template = load_prompt(prompt_name)
 
@@ -784,40 +713,10 @@ def run_analysis_prompt(prompt_name: str, aggregated: dict, facets: list[dict]) 
 
     full_prompt = prompt_template + "\n\nDATA:\n" + context
 
-    result = call_llm(full_prompt)
+    result = call_llm(full_prompt, api_key=api_key)
     return prompt_name, result
 
 
-@app.command()
-def analyze(
-    input_path: Path = typer.Option(..., "--input", "-i", help="Input aggregated JSON file"),
-    facets_path: Path = typer.Option(..., "--facets", "-f", help="Input facets JSON file"),
-    output_path: Path = typer.Option(..., "--output", "-o", help="Output analysis JSON file")
-):
-    """Run 7 analysis prompts in parallel (map-reduce pattern)."""
-    aggregated = json.loads(input_path.read_text())
-    facets = json.loads(facets_path.read_text())
-
-    console.print(f"[bold]Running {len(ANALYSIS_PROMPTS)} analysis prompts in parallel...[/bold]")
-
-    # Create worker that captures aggregated/facets context
-    def analysis_worker(prompt_name: str) -> tuple[str, dict]:
-        return run_analysis_prompt(prompt_name, aggregated, facets)
-
-    raw_results, errors = parallel_llm_map(
-        items=ANALYSIS_PROMPTS,
-        worker_fn=analysis_worker,
-        description="Running analysis",
-        max_workers=7
-    )
-
-    # Convert list of (name, result) tuples to dict
-    results = {name: result for name, result in raw_results}
-    for err in errors:
-        results[err["item"]] = {"error": err["error"]}
-
-    output_path.write_text(json.dumps(results, indent=2))
-    console.print(f"[green]Analysis results saved to {output_path}[/green]")
 
 
 # ============================================================================
@@ -825,7 +724,7 @@ def analyze(
 # ============================================================================
 
 @weave.op(color="cyan")
-def generate_at_a_glance(analysis: dict, aggregated: dict) -> dict:
+def generate_at_a_glance(analysis: dict, aggregated: dict, api_key: str | None = None) -> dict:
     """Generate at-a-glance synthesis from analysis results."""
     prompt_template = load_prompt("at_a_glance")
 
@@ -874,36 +773,9 @@ def generate_at_a_glance(analysis: dict, aggregated: dict) -> dict:
     prompt = prompt.replace("${suggestions.usage_patterns}", patterns_bullets)
     prompt = prompt.replace("${on_the_horizon}", horizon_bullets)
 
-    return call_llm(prompt)
+    return call_llm(prompt, api_key=api_key)
 
 
-@app.command()
-def synthesize(
-    input_path: Path = typer.Option(..., "--input", "-i", help="Input analysis JSON file"),
-    aggregated_path: Path = typer.Option(None, "--aggregated", "-a", help="Aggregated data JSON (optional)"),
-    output_path: Path = typer.Option(..., "--output", "-o", help="Output report JSON file")
-):
-    """Generate at-a-glance synthesis from all analysis results."""
-    analysis = json.loads(input_path.read_text())
-
-    aggregated = {}
-    if aggregated_path and aggregated_path.exists():
-        aggregated = json.loads(aggregated_path.read_text())
-
-    console.print("[bold]Generating at-a-glance synthesis...[/bold]")
-
-    at_a_glance = generate_at_a_glance(analysis, aggregated)
-
-    # Build final report
-    report = {
-        "at_a_glance": at_a_glance,
-        "analysis": analysis,
-        "aggregated": aggregated,
-        "generated_at": datetime.now().isoformat()
-    }
-
-    output_path.write_text(json.dumps(report, indent=2))
-    console.print(f"[green]Report saved to {output_path}[/green]")
 
 
 # ============================================================================
@@ -925,60 +797,84 @@ def _redact_transcripts(inputs: dict) -> dict:
 )
 def run_insights_pipeline(
     transcripts: list[dict],
-    session_count: int,
-    date_range: str,
-    workers: int = 5
-) -> Annotated[bytes, Content[Literal['html']]]:
+    api_key: str | None = None,
+    workers: int = 5,
+    log: Callable[[str], None] | None = None
+) -> dict:
     """
     Run the full insights pipeline on transcripts.
 
     Args:
         transcripts: List of parsed session transcripts
-        session_count: Number of sessions being analyzed
-        date_range: Date range string for context (e.g. "2024-01-01 to 2024-01-31")
+        api_key: W&B API key (or set WANDB_API_KEY env var)
         workers: Number of parallel workers
+        log: Optional callback for log messages
 
     Returns:
         HTML report bytes
     """
+    def emit(msg: str):
+        if log:
+            log(msg)
+
     # Filter valid transcripts
     valid_transcripts = [t for t in transcripts if not should_skip_session(t)]
-    console.print(f"[bold]Processing {len(valid_transcripts)} sessions ({len(transcripts) - len(valid_transcripts)} skipped) with {workers} workers...[/bold]")
+    skipped = len(transcripts) - len(valid_transcripts)
+    emit(f"Processing {len(valid_transcripts)} sessions ({skipped} skipped) with {workers} workers...")
 
     # Stage 1: Extract facets in parallel
-    console.print("\n[bold]Stage 1: Extracting facets[/bold]")
+    emit("\n[Stage 1] Extracting facets...")
+
+    def extract_worker(t):
+        return extract_facets_from_transcript(t, api_key)
+
     facets, errors = parallel_llm_map(
         items=valid_transcripts,
-        worker_fn=extract_facets_from_transcript,
-        description="Extracting facets",
-        max_workers=workers
+        worker_fn=extract_worker,
+        max_workers=workers,
+        on_progress=lambda c, t: emit(f"  Facets: {c}/{t}")
     )
-    console.print(f"[green]Extracted {len(facets)} facets ({len(errors)} errors)[/green]")
+    emit(f"  Extracted {len(facets)} facets ({len(errors)} errors)")
 
     # Stage 2: Aggregate (pure Python) - pass transcripts for session-level stats
-    console.print("\n[bold]Stage 2: Aggregating facets[/bold]")
+    emit("\n[Stage 2] Aggregating facets...")
     aggregated = aggregate_facets_impl(facets, valid_transcripts)
 
     # Stage 3: Run analysis prompts in parallel
-    console.print("\n[bold]Stage 3: Running analysis prompts[/bold]")
+    emit("\n[Stage 3] Running 7 analysis prompts...")
 
     def analysis_worker(prompt_name: str) -> tuple[str, dict]:
-        return run_analysis_prompt(prompt_name, aggregated, facets)
+        return run_analysis_prompt(prompt_name, aggregated, facets, api_key)
 
     raw_results, analysis_errors = parallel_llm_map(
         items=ANALYSIS_PROMPTS,
         worker_fn=analysis_worker,
-        description="Running analysis",
-        max_workers=7
+        max_workers=7,
+        on_progress=lambda c, t: emit(f"  Analysis: {c}/{t}")
     )
 
     analysis = {name: result for name, result in raw_results}
     for err in analysis_errors:
         analysis[err["item"]] = {"error": err["error"]}
+    emit(f"  Completed: {', '.join(analysis.keys())}")
 
     # Stage 4: Generate at-a-glance synthesis
-    console.print("\n[bold]Stage 4: Generating synthesis[/bold]")
-    at_a_glance = generate_at_a_glance(analysis, aggregated)
+    emit("\n[Stage 4] Generating synthesis...")
+    at_a_glance = generate_at_a_glance(analysis, aggregated, api_key)
+
+    # Calculate date range from transcripts
+    all_dates = []
+    for t in transcripts:
+        if t.get("start_time"):
+            all_dates.append(t["start_time"][:10])
+        if t.get("end_time"):
+            all_dates.append(t["end_time"][:10])
+
+    if all_dates:
+        sorted_dates = sorted(set(all_dates))
+        date_range = f"{sorted_dates[0]} to {sorted_dates[-1]}"
+    else:
+        date_range = "unknown"
 
     # Build final report
     report = {
@@ -986,27 +882,47 @@ def run_insights_pipeline(
         "analysis": analysis,
         "aggregated": aggregated,
         "generated_at": datetime.now().isoformat(),
-        "session_count": session_count,
+        "session_count": len(transcripts),
         "date_range": date_range
     }
 
-    # Generate HTML report
+    # Generate HTML report and set as call view
+    emit("\nGenerating HTML report...")
     html = generate_html_report(report)
+    emit(f"Pipeline complete! Report size: {len(html) / 1024:.1f} KB")
 
-    return html.encode('utf-8')
+    # Set the report as a view on the call page
+    weave.set_view("report", Content.from_text(html, extension=".html"))
+
+    return {
+        "session_count": len(transcripts),
+        "analyzed_count": len(facets),
+        "date_range": date_range,
+        "generated_at": report["generated_at"],
+        "html": html,
+    }
 
 
 def load_transcripts(
     transcripts_path: Path,
     use_claude_dir: bool = False,
-    limit: int = None
+    limit: int | None = None
 ) -> tuple[list[dict], str]:
-    """Load transcripts and return (transcripts, date_range_str)."""
+    """
+    Load transcripts from various sources.
+
+    Args:
+        transcripts_path: Path to transcripts (directory or file)
+        use_claude_dir: Treat as ~/.claude/projects directory
+        limit: Limit number of sessions to load
+
+    Returns:
+        Tuple of (transcripts, date_range_str)
+    """
     transcripts = []
 
     if use_claude_dir or (transcripts_path.is_dir() and (transcripts_path / "projects").exists()):
         projects_dir = transcripts_path / "projects" if (transcripts_path / "projects").exists() else transcripts_path
-        console.print(f"[bold]Loading sessions from Claude projects directory...[/bold]")
         transcripts = load_transcripts_from_claude_dir(projects_dir, limit=limit)
     elif transcripts_path.is_dir():
         jsonl_files = list(transcripts_path.glob("*.jsonl"))
@@ -1014,8 +930,8 @@ def load_transcripts(
             for f in jsonl_files[:limit] if limit else jsonl_files:
                 try:
                     transcripts.append(parse_jsonl_session(f))
-                except Exception as e:
-                    console.print(f"[yellow]Warning: Could not parse {f.name}: {e}[/yellow]")
+                except Exception:
+                    pass
         else:
             json_files = list(transcripts_path.glob("*.json"))
             for f in json_files[:limit] if limit else json_files:
@@ -1047,82 +963,30 @@ def load_transcripts(
 
 
 # ============================================================================
-# CLI Commands
+# Weave Initialization (optional)
 # ============================================================================
 
-@app.command()
-def run_all(
-    transcripts_path: Path = typer.Option(..., "--transcripts", "-t", help="Input transcripts directory or file"),
-    output_path: Path = typer.Option(..., "--output", "-o", help="Output report JSON file"),
-    keep_intermediate: bool = typer.Option(False, "--keep-intermediate", "-k", help="Keep intermediate files"),
-    limit: int = typer.Option(None, "--limit", "-l", help="Limit number of sessions to process"),
-    use_claude_dir: bool = typer.Option(False, "--claude-dir", "-c", help="Treat input as ~/.claude/projects directory"),
-    workers: int = typer.Option(5, "--workers", "-w", help="Number of parallel workers")
-):
-    """Run the full insights pipeline."""
-    console.print("[bold blue]Starting full insights pipeline...[/bold blue]")
-
-    # Load transcripts
-    transcripts, date_range = load_transcripts(transcripts_path, use_claude_dir, limit)
-
-    # Run pipeline
-    html_bytes = run_insights_pipeline(
-        transcripts=transcripts,
-        session_count=len(transcripts),
-        date_range=date_range,
-        workers=workers
-    )
-
-    # Save HTML output
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    html_path = output_path.with_suffix('.html')
-    html_path.write_bytes(html_bytes)
-
-    console.print(f"\n[bold green]Pipeline complete![/bold green]")
-    console.print(f"  HTML: {html_path}")
+_weave_initialized = False
+_weave_url = None
 
 
-@app.command()
-def run_local(
-    output_path: Path = typer.Option(Path("output/report.json"), "--output", "-o", help="Output report JSON file"),
-    limit: int = typer.Option(10, "--limit", "-l", help="Limit number of sessions to process"),
-    workers: int = typer.Option(5, "--workers", "-w", help="Number of parallel workers")
-):
-    """Run insights on your local Claude Code sessions (~/.claude/projects)."""
-    claude_dir = Path.home() / ".claude" / "projects"
+def init_weave(project: str = "claude-code-insights") -> str:
+    """
+    Initialize Weave tracing (optional).
 
-    if not claude_dir.exists():
-        console.print(f"[red]Claude projects directory not found: {claude_dir}[/red]")
-        raise typer.Exit(1)
+    Call this before running the pipeline if you want tracing.
 
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-
-    run_all(
-        transcripts_path=claude_dir,
-        output_path=output_path,
-        keep_intermediate=True,
-        limit=limit,
-        use_claude_dir=True,
-        workers=workers
-    )
+    Returns:
+        The Weave project URL
+    """
+    global _weave_initialized, _weave_url
+    if not _weave_initialized:
+        client = weave.init(project)
+        _weave_url = f"https://wandb.ai/{client.entity}/{client.project}/weave"
+        _weave_initialized = True
+    return _weave_url
 
 
-# ============================================================================
-# HTML Report Generation (standalone command)
-# ============================================================================
-
-
-@app.command()
-def html_report(
-    input_path: Path = typer.Option(..., "--input", "-i", help="Input report JSON file"),
-    output_path: Path = typer.Option(..., "--output", "-o", help="Output HTML file")
-):
-    """Generate HTML report from JSON report."""
-    report = json.loads(input_path.read_text())
-    html = generate_html_report(report)
-    output_path.write_text(html)
-    console.print(f"[green]HTML report saved to {output_path}[/green]")
-
-
-if __name__ == "__main__":
-    app()
+def get_weave_url() -> str | None:
+    """Get the Weave URL if initialized."""
+    return _weave_url
